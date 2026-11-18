@@ -60,14 +60,16 @@ final class AppUpdates {
                 String version = versions.getString(i);
                 if (newer(version, candidate)) candidate = version;
             }
-            if (newer(candidate, installed)) {
-                String release = releaseVersion("tags/v" + candidate);
-                if (candidate.equals(release)) return release;
-            }
         } catch (Exception failure) {
             android.util.Log.w("IptvUpdates", "CDN lookup failed; checking GitHub Releases", failure);
         }
-        String release = releaseVersion("latest");
+        String release;
+        try {
+            release = releaseVersion("latest");
+        } catch (Exception failure) {
+            if (!newer(candidate, installed)) throw failure;
+            release = releaseVersion("tags/v" + candidate);
+        }
         return newer(release, installed) ? release : null;
     }
 
