@@ -21,6 +21,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
       - name: Install Android SDK
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
       - name: Build APK
@@ -46,6 +49,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: unsigned-apk
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
       - name: Sign and verify APK
         env:
           APK_KEYSTORE: ${{ secrets.APK_KEYSTORE }}
