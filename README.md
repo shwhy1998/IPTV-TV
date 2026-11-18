@@ -27,10 +27,9 @@
 - **直播源**支持添加、查看、编辑、删除和切换。
 - **定时刷新**在应用处于前台时按所设间隔刷新当前直播源与 EPG。启动刷新默认开启，设置中也可以立即刷新。
 - **立即刷新**在直播源和 EPG 请求结束后提示成功，或说明哪一项失败。
-- **检查更新**在用户操作后查询 jsDelivr，并核实 GitHub 正式 Release。下载时显示进度，校验 SHA-256、版本和签名后自动进入系统安装确认。升级保留直播源和设置。Android 8.0 及以上可能需要允许 IPTV TV 作为安装来源。
 - 播放使用 Media3 ExoPlayer 和系统硬件视频解码。本地只缓存当前频道清单与节目数据，视频不会写入存储。
 - 如果运营商使用组播和 FCC，请将 M3U 接入 [rtp2httpd](https://rtp2httpd.com/)，再把 rtp2httpd 输出的 HTTP 播放清单交给电视。FCC 请求由网关处理，电视直接播放网关输出。
-- 频道台标只取自播放清单的 `tvg-logo`。
+- 频道台标只取自播放清单的 `tvg-logo`，按需下载到内存。临时下载失败会在再次浏览时重试。
 
 ## 本地编译与发布
 
@@ -43,5 +42,11 @@
 Windows 使用 `gradlew.bat :app:assembleDebug`。调试 APK 位于 `app/build/outputs/apk/debug/`。
 
 每次推送分支或更新 PR 都会触发 [GitHub Actions 构建](https://github.com/shwhy1998/IPTV-TV/actions)。合并到 `main` 后，工作流会签名 APK，校验签名并将 APK 和 SHA-256 文件发布到 Release。
+
+## 测试
+
+本地运行 `./gradlew :app:testDebugUnitTest`（Windows 使用 `gradlew.bat`）。测试涵盖播放清单、线路标签、节目查询、HTTP/Gzip、定时刷新间隔和台标备用地址。GitHub Actions 在打包前运行这些测试。
+
+已有直播源的电视可运行 `pwsh -File scripts/test-tv.ps1 -Device <ADB序列号> -PlaylistUrl <已配置的直播源> -AllLogos`。脚本检查遥控器、设置、直播源管理和频道图标。可用 `-LineChannel <多线路频道名>` 测试线路切换。测试会还原修改过的刷新设置，并删除测试用地址。
 
 正式版号来自 `VERSION`。发布新正式版时，同时提交对应的 `release-notes/v<版本>.md`。同版本后续的 `main` 构建会自动创建带构建号的预发布版，更新说明来自该次推送的提交记录。正式版仍保留在 Releases 中。

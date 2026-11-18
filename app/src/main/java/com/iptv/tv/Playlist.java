@@ -1,7 +1,6 @@
 package com.iptv.tv;
 
 import android.util.Xml;
-import android.net.Uri;
 import org.xmlpull.v1.XmlPullParser;
 import java.io.*;
 import java.net.*;
@@ -9,7 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.regex.*;
-import java.util.zip.GZIPInputStream;
 
 final class Playlist implements Serializable {
     private static final long serialVersionUID = 1L;
@@ -44,75 +42,100 @@ final class Playlist implements Serializable {
     final Map<String, List<Programme>> guide = new HashMap<>();
     String guideUrl;
 
+    private static final Pattern ATTRIBUTE = Pattern.compile("(?:^|\\s)([a-zA-Z0-9_-]+)\\s*=\\s*\"([^\"]*)\"");
+    private static final Pattern LINE_LABEL = Pattern.compile("[^/?#&=]+");
+
     static InputStream open(String url) throws IOException {
-        URL target = new URL(url);
-        if (!target.getProtocol().matches("https?")) throw new IOException("Expected an HTTP URL");
-        URLConnection connection = target.openConnection();
-        connection.setConnectTimeout(8000);
-        connection.setReadTimeout(12000);
-        PushbackInputStream stream = new PushbackInputStream(connection.getInputStream(), 2);
-        int first = stream.read(), second = stream.read();
-        if (second >= 0) stream.unread(second);
-        if (first >= 0) stream.unread(first);
-        return first == 31 && second == 139 ? new GZIPInputStream(stream) : stream;
+        return HttpStreams.open(new URL(url), 8000, 12000, null);
     }
 
-    static String attribute(String line, String key) {
-        Matcher match = Pattern.compile("(?:^|\\s)" + key + "=\"([^\"]*)\"", Pattern.CASE_INSENSITIVE).matcher(line);
-        return match.find() ? match.group(1).trim() : "";
+    private static Map<String, String> attributes(String line) {
+        Map<String, String> values = new HashMap<>();
+        Matcher match = ATTRIBUTE.matcher(line);
+        while (match.find()) values.put(match.group(1).toLowerCase(Locale.ROOT), match.group(2).trim());
+        return values;
+    }
+
+    private static String attribute(Map<String, String> values, String key) {
+        String value = values.get(key);
+        return value == null ? "" : value;
     }
 
     static Playlist load(String source) throws IOException {
-        Playlist result = new Playlist();
-        URL base = new URL(source);
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(open(source), StandardCharsets.UTF_8))) {
-            Channel item = null;
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.replace("\uFEFF", "").trim();
-                if (line.startsWith("#EXTM3U")) {
-                    String epg = attribute(line, "x-tvg-url");
-                    if (epg.isEmpty()) epg = attribute(line, "url-tvg");
-                    if (!epg.isEmpty()) result.guideUrl = new URL(base, epg.split(",")[0].trim()).toString();
-                } else if (line.startsWith("#EXTINF:")) {
-                    item = new Channel();
-                    item.id = attribute(line, "tvg-id");
-                    item.group = attribute(line, "group-title");
-                    if (item.group.isEmpty()) item.group = "未分组";
-                    item.logo = attribute(line, "tvg-logo");
-                    if (!item.logo.isEmpty()) item.logo = new URL(base, item.logo).toString();
-                    boolean quoted = false;
-                    for (int i = 8; i < line.length(); i++) {
-                        char c = line.charAt(i);
-                        if (c == '"') quoted = !quoted;
-                        if (c == ',' && !quoted) {
-                            item.name = line.substring(i + 1).trim();
-                            break;
-                        }
+            return parse(reader, new URL(source));
+        }
+    }
+
+    static Playlist parse(BufferedReader reader, URL base) throws IOException {
+        Playlist result = new Playlist();
+        Channel item = null;
+        for (String line; (line = reader.readLine()) != null;) {
+            line = line.replace("\uFEFF", "").trim();
+            if (line.startsWith("#EXTM3U")) {
+                Map<String, String> header = attributes(line);
+                String epg = attribute(header, "x-tvg-url");
+                if (epg.isEmpty()) epg = attribute(header, "url-tvg");
+                String guide = resolveHttp(base, epg.split(",", 2)[0].trim());
+                if (!guide.isEmpty()) result.guideUrl = guide;
+            } else if (line.startsWith("#EXTINF:")) {
+                item = new Channel();
+                int separator = metadataEnd(line);
+                Map<String, String> fields = attributes(line.substring(0, separator));
+                item.id = attribute(fields, "tvg-id");
+                item.group = attribute(fields, "group-title");
+                if (item.group.isEmpty()) item.group = "未分组";
+                item.logo = resolveHttp(base, attribute(fields, "tvg-logo"));
+                item.name = separator < line.length() ? line.substring(separator + 1).trim() : "";
+                if (item.name.isEmpty()) item.name = attribute(fields, "tvg-name");
+            } else if (item != null && !line.startsWith("#") && !line.isEmpty()) {
+                int suffix = line.lastIndexOf('$');
+                String label = "";
+                if (suffix >= 0 && LINE_LABEL.matcher(line.substring(suffix + 1)).matches()) {
+                    String encoded = line.substring(suffix + 1);
+                    try {
+                        label = URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8");
+                    } catch (IllegalArgumentException malformedLabel) {
+                        label = encoded;
                     }
-                    if (item.name == null || item.name.isEmpty()) item.name = attribute(line, "tvg-name");
-                } else if (item != null && !line.startsWith("#") && !line.isEmpty()) {
-                    int suffix = line.lastIndexOf('$');
-                    String label = "";
-                    if (suffix >= 0 && suffix + 1 < line.length()
-                        && line.substring(suffix + 1).matches("[^/?#&=]+")) {
-                        label = Uri.decode(line.substring(suffix + 1));
-                        line = line.substring(0, suffix);
-                    }
-                    URL url = new URL(base, line);
-                    if ("http".equals(url.getProtocol()) || "https".equals(url.getProtocol())) {
-                        if (item.lines.isEmpty()) {
-                            if (item.name.isEmpty()) item.name = "频道 " + (result.channels.size() + 1);
-                            result.channels.add(item);
-                        }
-                        item.lines.add(new Line(url.toString(), label));
-                    }
+                    line = line.substring(0, suffix);
                 }
+                String url = resolveHttp(base, line);
+                if (url.isEmpty()) continue;
+                if (item.lines.isEmpty()) {
+                    if (item.name.isEmpty()) item.name = "频道 " + (result.channels.size() + 1);
+                    result.channels.add(item);
+                }
+                item.lines.add(new Line(url, label));
             }
         }
         if (result.channels.isEmpty()) throw new IOException("清单中没有 HTTP 播放频道");
         return result;
     }
+
+    private static int metadataEnd(String line) {
+        boolean quoted = false;
+        for (int i = 8; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '"') quoted = !quoted;
+            if (c == ',' && !quoted) return i;
+        }
+        return line.length();
+    }
+
+    private static String resolveHttp(URL base, String value) {
+        if (value.isEmpty()) return "";
+        try {
+            URL url = new URL(base, value.replace(" ", "%20"));
+            if ("http".equals(url.getProtocol()) || "https".equals(url.getProtocol())) {
+                return url.toURI().toASCIIString();
+            }
+        } catch (MalformedURLException | URISyntaxException ignored) {
+            // Ignore malformed optional addresses without dropping the other channels.
+        }
+        return "";
+    }
+
 
     Map<String, List<Programme>> loadGuide() throws Exception {
         Map<String, List<Programme>> result = new HashMap<>();

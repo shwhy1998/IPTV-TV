@@ -26,8 +26,8 @@ jobs:
           packages: ''
       - name: Install Android SDK
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
-      - name: Build APK
-        run: ./gradlew --no-daemon :app:assembleRelease -PciVersionCode="$GITHUB_RUN_NUMBER"
+      - name: Test and build APK
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease -PciVersionCode="$GITHUB_RUN_NUMBER"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-apk
@@ -97,28 +97,3 @@ jobs:
           } > "$RUNNER_TEMP/release-notes.md"
           gh release create "$preview" "${assets[@]}" --target "$GITHUB_SHA" --prerelease \
             --title "IPTV TV $preview" --notes-file "$RUNNER_TEMP/release-notes.md"
-      - name: Mirror stable APK to jsDelivr
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version="$(tr -d '\r\n' < VERSION)"
-          tag="apk-v$version"
-          release="v$version"
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
-            exit 0
-          fi
-          target="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$release" --jq '.object.sha')"
-          if [ "$target" != "$GITHUB_SHA" ]; then
-            exit 0
-          fi
-          mirror="$(mktemp -d)"
-          trap 'rm -rf "$mirror"' EXIT
-          cp IPTV-TV.apk IPTV-TV.apk.sha256 "$mirror/"
-          cd "$mirror"
-          git init -b mirror
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            -c core.autocrlf=false add IPTV-TV.apk IPTV-TV.apk.sha256
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "Mirror signed APK for $release"
-          gh auth setup-git
-          git push "https://github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/tags/$tag"

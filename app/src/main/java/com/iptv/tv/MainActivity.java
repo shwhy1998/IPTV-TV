@@ -3,21 +3,17 @@ package com.iptv.tv;
 import android.app.*;
 import android.content.SharedPreferences;
 import android.content.DialogInterface;
-import android.content.ActivityNotFoundException;
-import android.content.Intent;
 import android.graphics.*;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.*;
-import android.provider.Settings;
 import android.text.InputType;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
 import android.text.TextUtils;
-import android.util.LruCache;
 import android.view.*;
 import android.widget.*;
 import androidx.media3.common.*;
@@ -26,13 +22,8 @@ import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.*;
 import org.json.JSONArray;
 
 public final class MainActivity extends Activity {
@@ -44,16 +35,9 @@ public final class MainActivity extends Activity {
     private static final int PROGRAMME = 0xff91bdb5;
     private static final int SHEET = 0xf216191b;
     private static final int ROW_COUNT = 5;
-    private static final int MAX_LOGO_BYTES = 512 * 1024;
     private static final boolean MI_TV_4 = "xmen".equals(Build.DEVICE) && "amlogic".equals(Build.HARDWARE);
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ExecutorService network = Executors.newSingleThreadExecutor();
-    private final ExecutorService logoRequests = Executors.newFixedThreadPool(2);
-    private final LruCache<String, Bitmap> logos = new LruCache<String, Bitmap>(2 * 1024 * 1024) {
-        @Override protected int sizeOf(String key, Bitmap bitmap) { return bitmap.getByteCount(); }
-    };
-    private final Set<String> loadingLogos = new HashSet<>();
-    private final Set<String> failedLogos = new HashSet<>();
+    private LogoLoader logoLoader;
     private FrameLayout root;
     private SurfaceView video;
     private LinearLayout drawer, info, tools;
@@ -69,11 +53,8 @@ public final class MainActivity extends Activity {
     private Playlist playlist;
     private Playlist.Channel playing;
     private Playlist.Line playingLine;
-    private AppUpdates appUpdates;
-    private boolean updateRunning;
-    private Dialog updateProgress;
     private String activeSource;
-    private CatalogueCache catalogueCache;
+    private CatalogueRepository catalogue;
     private long lastListRefresh, lastGuideRefresh, tuneStarted;
     private final Runnable refreshClock = this::checkRefresh;
     private int toolIndex;
@@ -86,6 +67,7 @@ public final class MainActivity extends Activity {
     private final Runnable hideInfo = () -> {
         infoOpen = false;
         info.setVisibility(View.GONE);
+        logoLoader.unbind(infoLogo);
     };
 
     @Override public void onCreate(Bundle state) {
@@ -93,8 +75,8 @@ public final class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(5894);
         prefs = getSharedPreferences("iptv", MODE_PRIVATE);
-        appUpdates = new AppUpdates(this);
-        catalogueCache = new CatalogueCache(getCacheDir());
+        logoLoader = new LogoLoader(this, dp(144));
+        catalogue = new CatalogueRepository(new CatalogueCache(getCacheDir()));
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
         video = new SurfaceView(this);
@@ -259,10 +241,9 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        closeUpdateProgress();
         handler.removeCallbacksAndMessages(null);
-        network.shutdownNow();
-        logoRequests.shutdownNow();
+        catalogue.close();
+        logoLoader.close();
         super.onDestroy();
     }
 
@@ -363,71 +344,38 @@ public final class MainActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         if (refreshList || existing == null) lastListRefresh = now;
         if (refreshGuide || existing == null) lastGuideRefresh = now;
-        network.execute(() -> {
-            Playlist latest = readCache ? catalogueCache.read(source) : existing;
-            if (readCache && latest != null) publishCatalogue(id, latest);
-            boolean changed = false;
-            boolean updateGuide = refreshGuide;
-            boolean listFailed = false;
-            if (refreshList || latest == null) {
-                try {
-                    Playlist loaded = Playlist.load(source);
-                    if (latest != null && Objects.equals(latest.guideUrl, loaded.guideUrl)) {
-                        loaded.guide.putAll(latest.guide);
-                    }
-                    boolean newGuide = latest == null || !Objects.equals(latest.guideUrl, loaded.guideUrl);
-                    latest = loaded;
-                    changed = true;
-                    publishCatalogue(id, latest);
-                    updateGuide |= newGuide;
-                } catch (IOException failure) {
-                    listFailed = true;
-                    android.util.Log.w("IptvCatalogue", "Playlist refresh failed", failure);
-                }
+        catalogue.refresh(source, existing, refreshList, refreshGuide, readCache, new CatalogueRepository.Listener() {
+            @Override public void onCatalogue(Playlist loaded) {
+                publishCatalogue(id, loaded);
             }
-            boolean guideFailed = false;
-            boolean hasGuide = latest != null && latest.guideUrl != null;
-            if (latest != null) {
-                if (updateGuide && hasGuide) guideFailed = !fetchGuide(source, id, latest);
-                else if (changed) catalogueCache.write(source, latest);
-            }
-            String result = listFailed ? "刷新失败：无法读取直播源"
-                : guideFailed ? "直播源已刷新，EPG 刷新失败"
-                : hasGuide ? "刷新完成：直播源和 EPG 已更新" : "直播源刷新完成，未配置 EPG";
-            handler.post(() -> {
-                if (isDestroyed() || id != request) return;
-                loading = false;
-                if (playlist == null) status.setText("无法读取直播源，按左键管理直播源");
-                if (reportRefresh) {
-                    if (!refreshList || !refreshGuide) refresh(true, true, false);
-                    else {
-                        reportRefresh = false;
-                        Toast.makeText(this, result, Toast.LENGTH_LONG).show();
+
+            @Override public void onComplete(String result) {
+                handler.post(() -> {
+                    if (isDestroyed() || id != request) return;
+                    loading = false;
+                    if (playlist == null) status.setText("无法读取直播源，按左键管理直播源");
+                    if (reportRefresh) {
+                        if (!refreshList || !refreshGuide) refresh(true, true, false);
+                        else {
+                            reportRefresh = false;
+                            Toast.makeText(MainActivity.this, result, Toast.LENGTH_LONG).show();
+                        }
                     }
-                }
-            });
+                });
+            }
         });
     }
 
-    private boolean fetchGuide(String source, int id, Playlist base) {
-        try {
-            Playlist updated = new Playlist();
-            updated.channels.addAll(base.channels);
-            updated.guideUrl = base.guideUrl;
-            updated.guide.putAll(base.loadGuide());
-            catalogueCache.write(source, updated);
-            publishCatalogue(id, updated);
-            return true;
-        } catch (Exception failure) {
-            android.util.Log.w("IptvCatalogue", "EPG refresh failed", failure);
-            catalogueCache.write(source, base);
-            return false;
-        }
-    }
 
     private void publishCatalogue(int id, Playlist loaded) {
         handler.post(() -> {
             if (isDestroyed() || id != request) return;
+            if (playlist != null && playlist.channels.equals(loaded.channels)) {
+                playlist = loaded;
+                if (drawerOpen) renderDrawer();
+                if (infoOpen) renderInfo();
+                return;
+            }
             String previous = playingLine == null ? prefs.getString("channel_url", "") : playingLine.url;
             Playlist.Channel channel = loaded.channels.get(0);
             Playlist.Line line = channel.lines.get(0);
@@ -466,7 +414,7 @@ public final class MainActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         int hours = prefs.getInt("refresh_interval", 0);
         long last = Math.min(lastListRefresh, lastGuideRefresh);
-        if (hours > 0 && (last == 0 || now - last >= hours * 3_600_000L)) refresh(true, true, false);
+        if (CatalogueRepository.refreshDue(hours, last, now)) refresh(true, true, false);
         handler.postDelayed(refreshClock, 60_000);
     }
 
@@ -508,7 +456,7 @@ public final class MainActivity extends Activity {
             player.clearMediaItems();
         }
         if (source.isEmpty()) {
-            network.execute(catalogueCache::clear);
+            catalogue.clearCache();
             status.setText("按左键添加直播源");
         } else {
             refresh(true, true, true);
@@ -520,7 +468,7 @@ public final class MainActivity extends Activity {
         int hours = prefs.getInt("refresh_interval", 0);
         choose(null, new CharSequence[]{"直播源",
             switchLabel(hours == 0 ? "定时刷新" : "定时刷新   每 " + hours + " 小时", hours > 0),
-            switchLabel("启动刷新", launch), "立即刷新", "检查更新"}, -1, (dialog, index) -> {
+            switchLabel("启动刷新", launch), "立即刷新"}, -1, (dialog, index) -> {
             switch (index) {
                 case 0: manageSources(); break;
                 case 1: chooseInterval(); break;
@@ -541,113 +489,7 @@ public final class MainActivity extends Activity {
                             Toast.LENGTH_SHORT).show();
                     }
                     break;
-                case 4: checkAppUpdate(); break;
                 default: break;
-            }
-        });
-    }
-
-    private void checkAppUpdate() {
-        if (updateRunning) return;
-        updateRunning = true;
-        Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show();
-        network.execute(() -> {
-            try {
-                AppUpdates.Release available = appUpdates.findNewerVersion();
-                String installed = appUpdates.installedVersion();
-                handler.post(() -> {
-                    updateRunning = false;
-                    if (isDestroyed() || isFinishing()) return;
-                    if (available == null) showSheetMessage(null, "当前已是最新正式版 v" + installed);
-                    else choose("发现正式版 v" + available.version, new String[]{"下载更新"}, -1,
-                        (dialog, index) -> downloadAppUpdate(available));
-                });
-            } catch (Exception failure) {
-                updateFailure("检查更新失败，请稍后重试", failure);
-            }
-        });
-    }
-
-    private void downloadAppUpdate(AppUpdates.Release release) {
-        if (updateRunning) return;
-        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
-            choose("系统需要你允许 IPTV TV 安装更新", new String[]{"打开系统设置"}, -1, (dialog, index) -> {
-                try {
-                    startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.fromParts("package", getPackageName(), null)));
-                } catch (ActivityNotFoundException unavailable) {
-                    showSheetMessage(null, "请在电视系统设置中允许 IPTV TV 安装未知应用");
-                }
-            });
-            return;
-        }
-        updateRunning = true;
-        Dialog progress = new Dialog(this);
-        progress.setCancelable(false);
-        LinearLayout body = sheetBody("下载 v" + release.version);
-        TextView amount = text("正在连接下载节点…", 15, MUTED);
-        amount.setPadding(dp(10), dp(12), dp(10), dp(4));
-        body.addView(amount);
-        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(LIVE));
-        bar.setMax(100);
-        bar.setIndeterminate(true);
-        body.addView(bar, new LinearLayout.LayoutParams(-1, dp(20)));
-        updateProgress = progress;
-        showSheet(progress, body);
-        network.execute(() -> {
-            try {
-                File apk = appUpdates.download(release, bytes -> handler.post(() -> {
-                    if (updateProgress != progress) return;
-                    boolean knownSize = release.size > 0;
-                    int percent = knownSize ? (int) Math.min(100, bytes * 100 / release.size) : 0;
-                    bar.setIndeterminate(!knownSize || bytes == 0);
-                    bar.setProgress(percent);
-                    if (bytes == 0) amount.setText("正在连接下载节点…");
-                    else if (percent == 100) amount.setText("下载完成，正在校验更新包…");
-                    else if (knownSize) amount.setText(String.format(Locale.ROOT,
-                        "%.1f / %.1f MB   %d%%", bytes / 1048576.0, release.size / 1048576.0, percent));
-                    else amount.setText(String.format(Locale.ROOT, "已下载 %.1f MB", bytes / 1048576.0));
-                }));
-                handler.post(() -> {
-                    updateRunning = false;
-                    closeUpdateProgress();
-                    if (isDestroyed() || isFinishing()) return;
-                    launchInstaller(apk);
-                });
-            } catch (Exception failure) {
-                String message = failure instanceof IOException && failure.getMessage() != null
-                    && failure.getMessage().startsWith("更新包") ? failure.getMessage() : "下载更新失败，请稍后重试";
-                updateFailure(message, failure);
-            }
-        });
-    }
-
-    private void updateFailure(String message, Exception failure) {
-        android.util.Log.w("IptvUpdates", message, failure);
-        handler.post(() -> {
-            updateRunning = false;
-            closeUpdateProgress();
-            if (!isDestroyed() && !isFinishing()) showSheetMessage(null, message);
-        });
-    }
-
-    private void closeUpdateProgress() {
-        if (updateProgress != null) {
-            updateProgress.dismiss();
-            updateProgress = null;
-        }
-    }
-
-    private void launchInstaller(File apk) {
-        if (updateRunning) return;
-        updateRunning = true;
-        network.execute(() -> {
-            try {
-                UpdateInstaller.stage(getApplicationContext(), apk);
-                handler.post(() -> updateRunning = false);
-            } catch (IOException | IllegalStateException | SecurityException failure) {
-                updateFailure("无法打开系统安装器，请检查电视安装权限", failure);
             }
         });
     }
@@ -748,6 +590,7 @@ public final class MainActivity extends Activity {
     private void closeDrawer() {
         drawerOpen = false;
         drawer.setVisibility(View.GONE);
+        for (ChannelRow row : channelRows) logoLoader.unbind(row.logo);
     }
 
     private void selectGroup() {
@@ -768,6 +611,7 @@ public final class MainActivity extends Activity {
             ChannelRow row = channelRows.get(slot);
             row.container.setVisibility(slot < count ? View.VISIBLE : View.INVISIBLE);
             if (slot < count) row.bind(visible.get(offset + slot), offset + slot == focused);
+            else logoLoader.unbind(row.logo);
         }
     }
 
@@ -807,7 +651,7 @@ public final class MainActivity extends Activity {
             title.setText(programme == null ? "暂无节目单" : programme.title);
             title.setTextColor(programme == null ? MUTED : focused ? LIVE : PROGRAMME);
             live.setVisibility(channel == playing ? View.VISIBLE : View.GONE);
-            bindLogo(logo, channel);
+            logoLoader.bind(logo, channel, View.INVISIBLE, null);
         }
     }
 
@@ -823,64 +667,6 @@ public final class MainActivity extends Activity {
         label.setMaxLines(lines);
         label.setIncludeFontPadding(false);
         return label;
-    }
-
-    private void bindLogo(ImageView view, Playlist.Channel channel) {
-        String url = channel.logo;
-        view.setTag(url);
-        Bitmap cached = logos.get(url);
-        view.setImageBitmap(cached);
-        view.setVisibility(cached == null ? View.INVISIBLE : View.VISIBLE);
-        if (cached == null && !url.isEmpty() && !failedLogos.contains(url) && loadingLogos.add(url)) {
-            logoRequests.execute(() -> {
-                Bitmap picture = null;
-                try {
-                    picture = decodeLogo(url);
-                } catch (Exception ignored) {}
-                Bitmap result = picture;
-                handler.post(() -> {
-                    if (isDestroyed()) return;
-                    loadingLogos.remove(url);
-                    if (result == null) {
-                        failedLogos.add(url);
-                        return;
-                    }
-                    logos.put(url, result);
-                    for (ChannelRow row : channelRows) updateLogo(row.logo, url, result);
-                    updateLogo(infoLogo, url, result);
-                    if (url.equals(infoLogo.getTag())) infoDivider.setVisibility(View.VISIBLE);
-                });
-            });
-        }
-    }
-
-    private void updateLogo(ImageView view, String url, Bitmap bitmap) {
-        if (url.equals(view.getTag())) {
-            view.setImageBitmap(bitmap);
-            view.setVisibility(View.VISIBLE);
-        }
-    }
-
-    private Bitmap decodeLogo(String url) throws Exception {
-        byte[] data;
-        try (InputStream stream = Playlist.open(url); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            for (int length; (length = stream.read(buffer)) != -1;) {
-                if (bytes.size() + length > MAX_LOGO_BYTES) return null;
-                bytes.write(buffer, 0, length);
-            }
-            data = bytes.toByteArray();
-        }
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inJustDecodeBounds = true;
-        BitmapFactory.decodeByteArray(data, 0, data.length, options);
-        if (options.outWidth <= 0 || options.outHeight <= 0) return null;
-        options.inSampleSize = 1;
-        while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > dp(96)) {
-            options.inSampleSize *= 2;
-        }
-        options.inJustDecodeBounds = false;
-        return BitmapFactory.decodeByteArray(data, 0, data.length, options);
     }
 
     private String time(long milliseconds) {
@@ -901,10 +687,7 @@ public final class MainActivity extends Activity {
     }
 
     private void renderInfo() {
-        bindLogo(infoLogo, playing);
-        int logoVisibility = infoLogo.getDrawable() == null ? View.GONE : View.VISIBLE;
-        infoLogo.setVisibility(logoVisibility);
-        infoDivider.setVisibility(logoVisibility);
+        logoLoader.bind(infoLogo, playing, View.GONE, () -> infoDivider.setVisibility(infoLogo.getVisibility()));
         infoChannel.setText(playing.name);
         Playlist.Programme current = playlist.programme(playing, false);
         Playlist.Programme next = playlist.programme(playing, true);
