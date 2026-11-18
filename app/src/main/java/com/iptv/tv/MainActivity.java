@@ -45,7 +45,6 @@ public final class MainActivity extends Activity {
     private static final int SHEET = 0xf216191b;
     private static final int ROW_COUNT = 5;
     private static final int MAX_LOGO_BYTES = 512 * 1024;
-    private static final String PROJECT_LOGOS = "https://cdn.jsdelivr.net/gh/shwhy1998/IPTV@main/logo/";
     private static final boolean MI_TV_4 = "xmen".equals(Build.DEVICE) && "amlogic".equals(Build.HARDWARE);
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
@@ -72,6 +71,7 @@ public final class MainActivity extends Activity {
     private Playlist.Line playingLine;
     private AppUpdates appUpdates;
     private boolean updateRunning;
+    private Dialog updateProgress;
     private String activeSource;
     private CatalogueCache catalogueCache;
     private long lastListRefresh, lastGuideRefresh, tuneStarted;
@@ -82,6 +82,7 @@ public final class MainActivity extends Activity {
     private final List<Playlist.Channel> visible = new ArrayList<>();
     private int group, focused, offset, request;
     private boolean loading, drawerOpen, infoOpen;
+    private boolean reportRefresh;
     private final Runnable hideInfo = () -> {
         infoOpen = false;
         info.setVisibility(View.GONE);
@@ -258,6 +259,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        closeUpdateProgress();
         handler.removeCallbacksAndMessages(null);
         network.shutdownNow();
         logoRequests.shutdownNow();
@@ -366,6 +368,7 @@ public final class MainActivity extends Activity {
             if (readCache && latest != null) publishCatalogue(id, latest);
             boolean changed = false;
             boolean updateGuide = refreshGuide;
+            boolean listFailed = false;
             if (refreshList || latest == null) {
                 try {
                     Playlist loaded = Playlist.load(source);
@@ -378,22 +381,35 @@ public final class MainActivity extends Activity {
                     publishCatalogue(id, latest);
                     updateGuide |= newGuide;
                 } catch (IOException failure) {
+                    listFailed = true;
                     android.util.Log.w("IptvCatalogue", "Playlist refresh failed", failure);
                 }
             }
+            boolean guideFailed = false;
+            boolean hasGuide = latest != null && latest.guideUrl != null;
             if (latest != null) {
-                if (updateGuide) fetchGuide(source, id, latest);
+                if (updateGuide && hasGuide) guideFailed = !fetchGuide(source, id, latest);
                 else if (changed) catalogueCache.write(source, latest);
             }
+            String result = listFailed ? "刷新失败：无法读取直播源"
+                : guideFailed ? "直播源已刷新，EPG 刷新失败"
+                : hasGuide ? "刷新完成：直播源和 EPG 已更新" : "直播源刷新完成，未配置 EPG";
             handler.post(() -> {
                 if (isDestroyed() || id != request) return;
                 loading = false;
                 if (playlist == null) status.setText("无法读取直播源，按左键管理直播源");
+                if (reportRefresh) {
+                    if (!refreshList || !refreshGuide) refresh(true, true, false);
+                    else {
+                        reportRefresh = false;
+                        Toast.makeText(this, result, Toast.LENGTH_LONG).show();
+                    }
+                }
             });
         });
     }
 
-    private void fetchGuide(String source, int id, Playlist base) {
+    private boolean fetchGuide(String source, int id, Playlist base) {
         try {
             Playlist updated = new Playlist();
             updated.channels.addAll(base.channels);
@@ -401,9 +417,11 @@ public final class MainActivity extends Activity {
             updated.guide.putAll(base.loadGuide());
             catalogueCache.write(source, updated);
             publishCatalogue(id, updated);
+            return true;
         } catch (Exception failure) {
             android.util.Log.w("IptvCatalogue", "EPG refresh failed", failure);
             catalogueCache.write(source, base);
+            return false;
         }
     }
 
@@ -478,6 +496,7 @@ public final class MainActivity extends Activity {
         activeSource = source;
         request++;
         loading = false;
+        reportRefresh = false;
         lastListRefresh = lastGuideRefresh = 0;
         closeDrawer();
         hideInfo.run();
@@ -515,9 +534,11 @@ public final class MainActivity extends Activity {
                 case 3:
                     if (activeSource.isEmpty()) showSheetMessage(null, "请先添加直播源");
                     else {
-                        boolean wasLoading = loading;
+                        boolean alreadyRefreshing = loading;
+                        reportRefresh = true;
                         refresh(true, true, false);
-                        Toast.makeText(this, wasLoading ? "正在刷新" : "已开始刷新", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this, alreadyRefreshing ? "正在刷新" : "正在刷新直播源和 EPG…",
+                            Toast.LENGTH_SHORT).show();
                     }
                     break;
                 case 4: checkAppUpdate(); break;
@@ -561,15 +582,38 @@ public final class MainActivity extends Activity {
             return;
         }
         updateRunning = true;
-        Toast.makeText(this, "正在下载并校验更新…", Toast.LENGTH_SHORT).show();
+        Dialog progress = new Dialog(this);
+        progress.setCancelable(false);
+        LinearLayout body = sheetBody("下载 v" + release.version);
+        TextView amount = text("正在连接下载节点…", 15, MUTED);
+        amount.setPadding(dp(10), dp(12), dp(10), dp(4));
+        body.addView(amount);
+        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(LIVE));
+        bar.setMax(100);
+        bar.setIndeterminate(true);
+        body.addView(bar, new LinearLayout.LayoutParams(-1, dp(20)));
+        updateProgress = progress;
+        showSheet(progress, body);
         network.execute(() -> {
             try {
-                File apk = appUpdates.download(release);
+                File apk = appUpdates.download(release, bytes -> handler.post(() -> {
+                    if (updateProgress != progress) return;
+                    boolean knownSize = release.size > 0;
+                    int percent = knownSize ? (int) Math.min(100, bytes * 100 / release.size) : 0;
+                    bar.setIndeterminate(!knownSize || bytes == 0);
+                    bar.setProgress(percent);
+                    if (bytes == 0) amount.setText("正在连接下载节点…");
+                    else if (percent == 100) amount.setText("下载完成，正在校验更新包…");
+                    else if (knownSize) amount.setText(String.format(Locale.ROOT,
+                        "%.1f / %.1f MB   %d%%", bytes / 1048576.0, release.size / 1048576.0, percent));
+                    else amount.setText(String.format(Locale.ROOT, "已下载 %.1f MB", bytes / 1048576.0));
+                }));
                 handler.post(() -> {
                     updateRunning = false;
+                    closeUpdateProgress();
                     if (isDestroyed() || isFinishing()) return;
-                    choose("v" + release.version + " 已下载并校验", new String[]{"打开系统安装器"}, -1,
-                        (dialog, index) -> launchInstaller(apk));
+                    launchInstaller(apk);
                 });
             } catch (Exception failure) {
                 String message = failure instanceof IOException && failure.getMessage() != null
@@ -583,8 +627,16 @@ public final class MainActivity extends Activity {
         android.util.Log.w("IptvUpdates", message, failure);
         handler.post(() -> {
             updateRunning = false;
+            closeUpdateProgress();
             if (!isDestroyed() && !isFinishing()) showSheetMessage(null, message);
         });
+    }
+
+    private void closeUpdateProgress() {
+        if (updateProgress != null) {
+            updateProgress.dismiss();
+            updateProgress = null;
+        }
     }
 
     private void launchInstaller(File apk) {
@@ -811,7 +863,7 @@ public final class MainActivity extends Activity {
 
     private Bitmap decodeLogo(String url) throws Exception {
         byte[] data;
-        try (InputStream stream = openLogo(url); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+        try (InputStream stream = Playlist.open(url); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
             for (int length; (length = stream.read(buffer)) != -1;) {
                 if (bytes.size() + length > MAX_LOGO_BYTES) return null;
@@ -829,20 +881,6 @@ public final class MainActivity extends Activity {
         }
         options.inJustDecodeBounds = false;
         return BitmapFactory.decodeByteArray(data, 0, data.length, options);
-    }
-
-    private InputStream openLogo(String url) throws IOException {
-        if (url.startsWith(PROJECT_LOGOS)) {
-            String name = Uri.decode(url.substring(PROJECT_LOGOS.length()));
-            if (name.endsWith(".png") && !name.contains("/") && !name.contains("\\")) {
-                try {
-                    return getAssets().open("channel-logos/" + name);
-                } catch (IOException ignored) {
-                    // The list can reference logos newer than the installed APK.
-                }
-            }
-        }
-        return Playlist.open(url);
     }
 
     private String time(long milliseconds) {

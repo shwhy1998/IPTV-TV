@@ -43,11 +43,17 @@ final class AppUpdates {
 
     static final class Release {
         final String version, sha256;
+        final long size;
 
-        Release(String version, String sha256) {
+        Release(String version, String sha256, long size) {
             this.version = version;
             this.sha256 = sha256;
+            this.size = size;
         }
+    }
+
+    interface Progress {
+        void update(long bytes);
     }
 
     AppUpdates(Context context) {
@@ -92,13 +98,13 @@ final class AppUpdates {
             JSONObject asset = assets.getJSONObject(i);
             String digest = asset.optString("digest");
             if ("IPTV-TV.apk".equals(asset.optString("name")) && digest.matches("sha256:[a-f0-9]{64}")) {
-                return new Release(tag.substring(1), digest.substring("sha256:".length()));
+                return new Release(tag.substring(1), digest.substring("sha256:".length()), asset.optLong("size"));
             }
         }
         throw new IOException("Release APK digest missing");
     }
 
-    File download(Release release) throws Exception {
+    File download(Release release, Progress progress) throws Exception {
         String version = release.version;
         PackageInfo installed = packages.getPackageInfo(context.getPackageName(), PackageManager.GET_SIGNATURES);
         if (!newer(version, installed.versionName)) throw new IOException("版本不是更新版");
@@ -108,12 +114,13 @@ final class AppUpdates {
         File apk = new File(directory, "IPTV-TV.apk");
         if (apk.isFile() && matchesHash(apk, expected)) {
             verifyPackage(apk, version, installed);
+            progress.update(apk.length());
             return apk;
         }
         File partial = new File(directory, "download.apk");
         try {
             String path = MIRROR_PATH + version + "/IPTV-TV.apk";
-            downloadFromMirrors(partial, expected, "https://fastly.jsdelivr.net" + path,
+            downloadFromMirrors(partial, expected, progress, "https://fastly.jsdelivr.net" + path,
                 "https://cdn.jsdelivr.net" + path,
                 "https://raw.githubusercontent.com/" + REPOSITORY + "/apk-v" + version + "/IPTV-TV.apk",
                 base);
@@ -125,11 +132,12 @@ final class AppUpdates {
         }
     }
 
-    private void downloadFromMirrors(File file, String expected, String... urls) throws Exception {
+    private void downloadFromMirrors(File file, String expected, Progress progress, String... urls) throws Exception {
         IOException last = null;
         for (String url : urls) {
             try {
-                savePackage(url, file, expected);
+                progress.update(0);
+                savePackage(url, file, expected, progress);
                 return;
             } catch (IOException failure) {
                 last = failure;
@@ -139,9 +147,9 @@ final class AppUpdates {
         throw last;
     }
 
-    private void savePackage(String url, File file, String expected) throws Exception {
+    private void savePackage(String url, File file, String expected, Progress progress) throws Exception {
         try (FileOutputStream output = new FileOutputStream(file)) {
-            transfer(url, output, MAX_APK_BYTES);
+            transfer(url, output, MAX_APK_BYTES, progress);
         }
         if (!matchesHash(file, expected)) throw new IOException("更新包的 SHA-256 校验失败");
     }
@@ -185,11 +193,11 @@ final class AppUpdates {
 
     private String read(String url, int limit) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        transfer(url, bytes, limit);
+        transfer(url, bytes, limit, null);
         return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
     }
 
-    private void transfer(String url, OutputStream output, int limit) throws IOException {
+    private void transfer(String url, OutputStream output, int limit, Progress progress) throws IOException {
         URL target = new URL(url);
         for (int redirects = 0; redirects <= 4; redirects++) {
             String host = target.getHost();
@@ -222,11 +230,17 @@ final class AppUpdates {
                 try (InputStream input = connection.getInputStream()) {
                     byte[] buffer = new byte[8192];
                     int total = 0;
+                    int reported = 0;
                     for (int count; (count = input.read(buffer)) != -1;) {
                         total += count;
                         if (total > limit) throw new IOException("更新响应超过大小限制");
                         output.write(buffer, 0, count);
+                        if (progress != null && total - reported >= 65_536) {
+                            progress.update(total);
+                            reported = total;
+                        }
                     }
+                    if (progress != null) progress.update(total);
                 }
                 return;
             } finally {
