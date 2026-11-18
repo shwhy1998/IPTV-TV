@@ -41,6 +41,15 @@ final class AppUpdates {
     private final File directory;
     private SSLSocketFactory legacyCdnTls;
 
+    static final class Release {
+        final String version, sha256;
+
+        Release(String version, String sha256) {
+            this.version = version;
+            this.sha256 = sha256;
+        }
+    }
+
     AppUpdates(Context context) {
         this.context = context.getApplicationContext();
         packages = context.getPackageManager();
@@ -51,7 +60,7 @@ final class AppUpdates {
         return packages.getPackageInfo(context.getPackageName(), 0).versionName;
     }
 
-    String findNewerVersion() throws Exception {
+    Release findNewerVersion() throws Exception {
         String installed = installedVersion();
         String candidate = installed;
         try {
@@ -63,29 +72,38 @@ final class AppUpdates {
         } catch (Exception failure) {
             android.util.Log.w("IptvUpdates", "CDN lookup failed; checking GitHub Releases", failure);
         }
-        String release;
+        Release release;
         try {
             release = releaseVersion("latest");
         } catch (Exception failure) {
             if (!newer(candidate, installed)) throw failure;
             release = releaseVersion("tags/v" + candidate);
         }
-        return newer(release, installed) ? release : null;
+        return release != null && newer(release.version, installed) ? release : null;
     }
 
-    private String releaseVersion(String path) throws Exception {
+    private Release releaseVersion(String path) throws Exception {
         JSONObject release = new JSONObject(read(RELEASES + path, MAX_METADATA_BYTES));
-        if (release.getBoolean("draft") || release.getBoolean("prerelease")) return "";
+        if (release.getBoolean("draft") || release.getBoolean("prerelease")) return null;
         String tag = release.getString("tag_name");
-        return tag.startsWith("v") ? tag.substring(1) : "";
+        if (!tag.startsWith("v")) return null;
+        JSONArray assets = release.getJSONArray("assets");
+        for (int i = 0; i < assets.length(); i++) {
+            JSONObject asset = assets.getJSONObject(i);
+            String digest = asset.optString("digest");
+            if ("IPTV-TV.apk".equals(asset.optString("name")) && digest.matches("sha256:[a-f0-9]{64}")) {
+                return new Release(tag.substring(1), digest.substring("sha256:".length()));
+            }
+        }
+        throw new IOException("Release APK digest missing");
     }
 
-    File download(String version) throws Exception {
+    File download(Release release) throws Exception {
+        String version = release.version;
         PackageInfo installed = packages.getPackageInfo(context.getPackageName(), PackageManager.GET_SIGNATURES);
         if (!newer(version, installed.versionName)) throw new IOException("版本不是更新版");
         String base = DOWNLOADS + "v" + version + "/IPTV-TV.apk";
-        String expected = read(base + ".sha256", 1024).trim().split("\\s+", 2)[0].toLowerCase(Locale.ROOT);
-        if (!expected.matches("[a-f0-9]{64}")) throw new IOException("更新校验文件无效");
+        String expected = release.sha256;
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("无法创建更新缓存");
         File apk = new File(directory, "IPTV-TV.apk");
         if (apk.isFile() && matchesHash(apk, expected)) {

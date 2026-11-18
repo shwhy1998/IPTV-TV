@@ -532,13 +532,13 @@ public final class MainActivity extends Activity {
         Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show();
         network.execute(() -> {
             try {
-                String available = appUpdates.findNewerVersion();
+                AppUpdates.Release available = appUpdates.findNewerVersion();
                 String installed = appUpdates.installedVersion();
                 handler.post(() -> {
                     updateRunning = false;
                     if (isDestroyed() || isFinishing()) return;
                     if (available == null) showSheetMessage(null, "当前已是最新正式版 v" + installed);
-                    else choose("发现正式版 v" + available, new String[]{"下载更新"}, -1,
+                    else choose("发现正式版 v" + available.version, new String[]{"下载更新"}, -1,
                         (dialog, index) -> downloadAppUpdate(available));
                 });
             } catch (Exception failure) {
@@ -547,7 +547,7 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void downloadAppUpdate(String version) {
+    private void downloadAppUpdate(AppUpdates.Release release) {
         if (updateRunning) return;
         if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
             choose("系统需要你允许 IPTV TV 安装更新", new String[]{"打开系统设置"}, -1, (dialog, index) -> {
@@ -564,11 +564,11 @@ public final class MainActivity extends Activity {
         Toast.makeText(this, "正在下载并校验更新…", Toast.LENGTH_SHORT).show();
         network.execute(() -> {
             try {
-                File apk = appUpdates.download(version);
+                File apk = appUpdates.download(release);
                 handler.post(() -> {
                     updateRunning = false;
                     if (isDestroyed() || isFinishing()) return;
-                    choose("v" + version + " 已下载并校验", new String[]{"打开系统安装器"}, -1,
+                    choose("v" + release.version + " 已下载并校验", new String[]{"打开系统安装器"}, -1,
                         (dialog, index) -> launchInstaller(apk));
                 });
             } catch (Exception failure) {
