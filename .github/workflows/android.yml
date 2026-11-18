@@ -97,3 +97,28 @@ jobs:
           } > "$RUNNER_TEMP/release-notes.md"
           gh release create "$preview" "${assets[@]}" --target "$GITHUB_SHA" --prerelease \
             --title "IPTV TV $preview" --notes-file "$RUNNER_TEMP/release-notes.md"
+      - name: Mirror stable APK to jsDelivr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          tag="apk-v$version"
+          release="v$version"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            exit 0
+          fi
+          target="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$release" --jq '.object.sha')"
+          if [ "$target" != "$GITHUB_SHA" ]; then
+            exit 0
+          fi
+          mirror="$(mktemp -d)"
+          trap 'rm -rf "$mirror"' EXIT
+          cp IPTV-TV.apk IPTV-TV.apk.sha256 "$mirror/"
+          cd "$mirror"
+          git init -b mirror
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            -c core.autocrlf=false add IPTV-TV.apk IPTV-TV.apk.sha256
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Mirror signed APK for $release"
+          gh auth setup-git
+          git push "https://github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/tags/$tag"

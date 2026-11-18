@@ -107,7 +107,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         String source = getIntent().getStringExtra("playlist_url");
         activeSource = source == null ? prefs.getString("source", DEFAULT_SOURCE) : source;
-        if (activeSource.isEmpty()) status.setText("按确认键添加直播源");
+        if (activeSource.isEmpty()) status.setText("按左键添加直播源");
         else {
             boolean refreshOnLaunch = prefs.getBoolean("refresh_on_launch", true);
             refresh(refreshOnLaunch, refreshOnLaunch, true);
@@ -388,7 +388,7 @@ public final class MainActivity extends Activity {
             handler.post(() -> {
                 if (isDestroyed() || id != request) return;
                 loading = false;
-                if (playlist == null) status.setText("无法读取直播源，按确认键查看设置");
+                if (playlist == null) status.setText("无法读取直播源，按左键管理直播源");
             });
         });
     }
@@ -490,7 +490,7 @@ public final class MainActivity extends Activity {
         }
         if (source.isEmpty()) {
             network.execute(catalogueCache::clear);
-            status.setText("按确认键添加直播源");
+            status.setText("按左键添加直播源");
         } else {
             refresh(true, true, true);
         }
@@ -677,7 +677,13 @@ public final class MainActivity extends Activity {
     }
 
     private void openDrawer() {
-        if (playlist == null) { if (!loading) manageSources(); return; }
+        if (playlist == null) {
+            if (!loading) {
+                if (activeSource.isEmpty() && sources().isEmpty()) editSource(null);
+                else manageSources();
+            }
+            return;
+        }
         hideInfo.run();
         drawerOpen = true;
         group = Math.max(0, groups.indexOf(playing.group));

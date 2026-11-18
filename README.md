@@ -6,7 +6,7 @@
 
 1. 在 [GitHub Releases](https://github.com/shwhy1998/IPTV-TV/releases) 下载 `IPTV-TV.apk`。应用支持 Android 6.0（API 23）及以上版本。
 2. 通过电视的应用安装功能或 Android SDK 的 `adb install -r IPTV-TV.apk` 安装。
-3. 启动应用，按左键进入直播源管理，或按菜单键进入「设置 → 直播源」。添加电视能访问的 M3U 地址。
+3. 首次启动没有直播源时，按左键打开添加表单。也可以按菜单键进入「设置 → 直播源」，添加电视能访问的 M3U 地址。
 
 新版 Release 使用项目专用签名。如果电视此前安装的是本地调试版，需要先卸载旧版，再安装 Release 并重新添加直播源。之后可在同一签名下覆盖升级。
 
@@ -26,7 +26,7 @@
 
 - **直播源**支持添加、查看、编辑、删除和切换。
 - **定时刷新**在应用处于前台时按所设间隔刷新当前直播源与 EPG。启动刷新默认开启，设置中也可以立即刷新。
-- **检查更新**在用户操作后查询 jsDelivr，并核实 GitHub 正式 Release。确认下载后，应用在私有缓存中校验 SHA-256、版本和签名，再打开系统安装器。Android 8.0 及以上可能需要在系统设置中允许 IPTV TV 作为安装来源。应用无需访问共享存储。
+- **检查更新**在用户操作后查询 jsDelivr，并核实 GitHub 正式 Release。APK 优先从 jsDelivr 的正式版镜像下载，校验 Release 的 SHA-256、版本和签名后，由系统安装界面确认。Android 8.0 及以上可能需要在系统设置中允许 IPTV TV 作为安装来源。应用无需访问共享存储。
 - 播放使用 Media3 ExoPlayer 和系统硬件视频解码。本地只缓存当前频道清单与节目数据，视频不会写入存储。
 - 如果运营商使用组播和 FCC，请将 M3U 接入 [rtp2httpd](https://rtp2httpd.com/)，再把 rtp2httpd 输出的 HTTP 播放清单交给电视。FCC 请求由网关处理，电视直接播放网关输出。
 - [内置台标来源](logo/README.md)
