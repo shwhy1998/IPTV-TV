@@ -32,7 +32,7 @@ final class AppUpdates {
     private static final String CDN = "https://data.jsdelivr.com/v1/package/gh/" + REPOSITORY;
     private static final String RELEASES = "https://api.github.com/repos/" + REPOSITORY + "/releases/";
     private static final String DOWNLOADS = "https://github.com/" + REPOSITORY + "/releases/download/";
-    private static final String MIRROR = "https://cdn.jsdelivr.net/gh/" + REPOSITORY + "@apk-v";
+    private static final String MIRROR_PATH = "/gh/" + REPOSITORY + "@apk-v";
     private static final int MAX_APK_BYTES = 32 * 1024 * 1024;
     private static final int MAX_METADATA_BYTES = 256 * 1024;
 
@@ -92,18 +92,31 @@ final class AppUpdates {
         }
         File partial = new File(directory, "download.apk");
         try {
-            try {
-                savePackage(MIRROR + version + "/IPTV-TV.apk", partial, expected);
-            } catch (IOException mirrorFailure) {
-                android.util.Log.w("IptvUpdates", "APK mirror failed; downloading from GitHub", mirrorFailure);
-                savePackage(base, partial, expected);
-            }
+            String path = MIRROR_PATH + version + "/IPTV-TV.apk";
+            downloadFromMirrors(partial, expected, "https://fastly.jsdelivr.net" + path,
+                "https://cdn.jsdelivr.net" + path,
+                "https://raw.githubusercontent.com/" + REPOSITORY + "/apk-v" + version + "/IPTV-TV.apk",
+                base);
             verifyPackage(partial, version, installed);
             if (!partial.renameTo(apk)) throw new IOException("无法保存更新包");
             return apk;
         } finally {
             partial.delete();
         }
+    }
+
+    private void downloadFromMirrors(File file, String expected, String... urls) throws Exception {
+        IOException last = null;
+        for (String url : urls) {
+            try {
+                savePackage(url, file, expected);
+                return;
+            } catch (IOException failure) {
+                last = failure;
+                android.util.Log.w("IptvUpdates", "Update endpoint failed: " + new URL(url).getHost(), failure);
+            }
+        }
+        throw last;
     }
 
     private void savePackage(String url, File file, String expected) throws Exception {
@@ -160,10 +173,12 @@ final class AppUpdates {
         URL target = new URL(url);
         for (int redirects = 0; redirects <= 4; redirects++) {
             String host = target.getHost();
-            boolean cdnHost = "data.jsdelivr.com".equals(host) || "release-assets.githubusercontent.com".equals(host);
-            if (!"https".equals(target.getProtocol()) || (!cdnHost && !"cdn.jsdelivr.net".equals(host)
+            boolean jsDelivr = host.endsWith(".jsdelivr.net") || "data.jsdelivr.com".equals(host);
+            boolean githubAssets = "release-assets.githubusercontent.com".equals(host)
+                || "objects.githubusercontent.com".equals(host) || "raw.githubusercontent.com".equals(host);
+            if (!"https".equals(target.getProtocol()) || (!jsDelivr && !githubAssets
                 && !"github.com".equals(host) && !"api.github.com".equals(host))) {
-                throw new IOException("Unexpected update host");
+                throw new IOException("Unexpected update endpoint: " + target.getProtocol() + "://" + host);
             }
             HttpsURLConnection connection = open(target);
             try {
@@ -171,7 +186,7 @@ final class AppUpdates {
                 try {
                     status = connection.getResponseCode();
                 } catch (SSLHandshakeException failure) {
-                    if (!cdnHost || Build.VERSION.SDK_INT > 25) throw failure;
+                    if ((!jsDelivr && !githubAssets) || Build.VERSION.SDK_INT > 25) throw failure;
                     connection.disconnect();
                     connection = open(target);
                     connection.setSSLSocketFactory(legacyCdnTls());
