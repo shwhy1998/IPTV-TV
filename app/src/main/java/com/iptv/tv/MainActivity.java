@@ -3,12 +3,15 @@ package com.iptv.tv;
 import android.app.*;
 import android.content.SharedPreferences;
 import android.content.DialogInterface;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.graphics.*;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.*;
+import android.provider.Settings;
 import android.text.InputType;
 import android.text.SpannableString;
 import android.text.Spanned;
@@ -24,6 +27,7 @@ import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.text.SimpleDateFormat;
@@ -66,6 +70,8 @@ public final class MainActivity extends Activity {
     private Playlist playlist;
     private Playlist.Channel playing;
     private Playlist.Line playingLine;
+    private AppUpdates appUpdates;
+    private boolean updateRunning;
     private String activeSource;
     private CatalogueCache catalogueCache;
     private long lastListRefresh, lastGuideRefresh, tuneStarted;
@@ -86,6 +92,7 @@ public final class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(5894);
         prefs = getSharedPreferences("iptv", MODE_PRIVATE);
+        appUpdates = new AppUpdates(this);
         catalogueCache = new CatalogueCache(getCacheDir());
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -494,7 +501,7 @@ public final class MainActivity extends Activity {
         int hours = prefs.getInt("refresh_interval", 0);
         choose(null, new CharSequence[]{"直播源",
             switchLabel(hours == 0 ? "定时刷新" : "定时刷新   每 " + hours + " 小时", hours > 0),
-            switchLabel("启动刷新", launch), "立即刷新"}, -1, (dialog, index) -> {
+            switchLabel("启动刷新", launch), "立即刷新", "检查更新"}, -1, (dialog, index) -> {
             switch (index) {
                 case 0: manageSources(); break;
                 case 1: chooseInterval(); break;
@@ -513,7 +520,82 @@ public final class MainActivity extends Activity {
                         Toast.makeText(this, wasLoading ? "正在刷新" : "已开始刷新", Toast.LENGTH_SHORT).show();
                     }
                     break;
+                case 4: checkAppUpdate(); break;
                 default: break;
+            }
+        });
+    }
+
+    private void checkAppUpdate() {
+        if (updateRunning) return;
+        updateRunning = true;
+        Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show();
+        network.execute(() -> {
+            try {
+                String available = appUpdates.findNewerVersion();
+                String installed = appUpdates.installedVersion();
+                handler.post(() -> {
+                    updateRunning = false;
+                    if (isDestroyed() || isFinishing()) return;
+                    if (available == null) showSheetMessage(null, "当前已是最新正式版 v" + installed);
+                    else choose("发现正式版 v" + available, new String[]{"下载更新"}, -1,
+                        (dialog, index) -> downloadAppUpdate(available));
+                });
+            } catch (Exception failure) {
+                updateFailure("检查更新失败，请稍后重试", failure);
+            }
+        });
+    }
+
+    private void downloadAppUpdate(String version) {
+        if (updateRunning) return;
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            choose("系统需要你允许 IPTV TV 安装更新", new String[]{"打开系统设置"}, -1, (dialog, index) -> {
+                try {
+                    startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.fromParts("package", getPackageName(), null)));
+                } catch (ActivityNotFoundException unavailable) {
+                    showSheetMessage(null, "请在电视系统设置中允许 IPTV TV 安装未知应用");
+                }
+            });
+            return;
+        }
+        updateRunning = true;
+        Toast.makeText(this, "正在下载并校验更新…", Toast.LENGTH_SHORT).show();
+        network.execute(() -> {
+            try {
+                File apk = appUpdates.download(version);
+                handler.post(() -> {
+                    updateRunning = false;
+                    if (isDestroyed() || isFinishing()) return;
+                    choose("v" + version + " 已下载并校验", new String[]{"打开系统安装器"}, -1,
+                        (dialog, index) -> launchInstaller(apk));
+                });
+            } catch (Exception failure) {
+                String message = failure instanceof IOException && failure.getMessage() != null
+                    && failure.getMessage().startsWith("更新包") ? failure.getMessage() : "下载更新失败，请稍后重试";
+                updateFailure(message, failure);
+            }
+        });
+    }
+
+    private void updateFailure(String message, Exception failure) {
+        android.util.Log.w("IptvUpdates", message, failure);
+        handler.post(() -> {
+            updateRunning = false;
+            if (!isDestroyed() && !isFinishing()) showSheetMessage(null, message);
+        });
+    }
+
+    private void launchInstaller(File apk) {
+        if (updateRunning) return;
+        updateRunning = true;
+        network.execute(() -> {
+            try {
+                UpdateInstaller.stage(getApplicationContext(), apk);
+                handler.post(() -> updateRunning = false);
+            } catch (IOException | IllegalStateException | SecurityException failure) {
+                updateFailure("无法打开系统安装器，请检查电视安装权限", failure);
             }
         });
     }
