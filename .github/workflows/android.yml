@@ -1,0 +1,93 @@
+name: Android APK
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Build APK
+        run: ./gradlew --no-daemon :app:assembleRelease -PciVersionCode="$GITHUB_RUN_NUMBER"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-apk
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-apk
+      - name: Sign and verify APK
+        env:
+          APK_KEYSTORE: ${{ secrets.APK_KEYSTORE }}
+          APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+        run: |
+          sdkmanager 'build-tools;36.0.0'
+          signer="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          key="$RUNNER_TEMP/iptv-tv.p12"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$APK_KEYSTORE" | base64 --decode > "$key"
+          "$signer" sign --ks "$key" --ks-type PKCS12 --ks-key-alias iptv-tv \
+            --ks-pass env:APK_KEYSTORE_PASSWORD --out IPTV-TV.apk app-release-unsigned.apk
+          "$signer" verify --print-certs IPTV-TV.apk
+          sha256sum IPTV-TV.apk > IPTV-TV.apk.sha256
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          stable="v$version"
+          preview="$stable-build.$GITHUB_RUN_NUMBER"
+          assets=(IPTV-TV.apk IPTV-TV.apk.sha256)
+          if ! gh release view "$stable" --json tagName >/dev/null 2>&1; then
+            notes="release-notes/$stable.md"
+            test -s "$notes"
+            if gh release create "$stable" "${assets[@]}" --target "$GITHUB_SHA" \
+                --title "IPTV TV $stable" --notes-file "$notes" --latest; then
+              exit 0
+            fi
+            gh release view "$stable" --json tagName >/dev/null
+          fi
+          if gh release view "$preview" --json tagName >/dev/null 2>&1; then
+            exit 0
+          fi
+          {
+            printf '## 本次构建\n\n'
+            if git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+              git log --format='- %s (%h)' "$BEFORE_SHA..$GITHUB_SHA"
+            else
+              git log -1 --format='- %s (%h)' "$GITHUB_SHA"
+            fi
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$preview" "${assets[@]}" --target "$GITHUB_SHA" --prerelease \
+            --title "IPTV TV $preview" --notes-file "$RUNNER_TEMP/release-notes.md"

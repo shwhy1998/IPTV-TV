@@ -1,0 +1,50 @@
+plugins {
+    id 'com.android.application' version '9.0.1'
+}
+android {
+    namespace 'com.iptv.tv'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'com.iptv.tv'
+        minSdk 23
+        targetSdk 32
+        versionCode providers.gradleProperty('ciVersionCode').map { it.toInteger() }.getOrElse(1)
+        versionName rootProject.file('VERSION').text.trim()
+    }
+}
+
+abstract class ChannelAssets extends DefaultTask {
+    @InputDirectory
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract DirectoryProperty getLogoDirectory()
+
+    @OutputDirectory
+    abstract DirectoryProperty getAssetsDirectory()
+
+    @javax.inject.Inject
+    abstract FileSystemOperations getFileOperations()
+
+    @TaskAction
+    void syncLogos() {
+        fileOperations.sync {
+            from(logoDirectory) {
+                include '*.png'
+                into 'channel-logos'
+            }
+            into assetsDirectory
+        }
+    }
+}
+
+def channelAssets = tasks.register('syncChannelAssets', ChannelAssets) {
+    def bundledLogos = rootProject.file('logo')
+    logoDirectory.set(bundledLogos.isDirectory() ? bundledLogos : rootProject.file('../logo'))
+    assetsDirectory.set(layout.buildDirectory.dir('generated/channel-assets'))
+}
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    variant.sources.assets.addGeneratedSourceDirectory(channelAssets) { it.assetsDirectory }
+}
+dependencies {
+    implementation 'androidx.media3:media3-exoplayer:1.9.4'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.9.4'
+}
